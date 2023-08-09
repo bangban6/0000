@@ -1,0 +1,72 @@
+import os
+import binascii
+import ecdsa
+import rlp
+from eth_hash.auto import keccak
+from multiprocessing import Pool, cpu_count, Value, Manager, Lock, current_process
+
+def private_key_to_address(private_key_hex):
+    private_key_bytes = bytes.fromhex(private_key_hex)
+    private_key = ecdsa.SigningKey.from_string(private_key_bytes, curve=ecdsa.SECP256k1)
+    public_key = private_key.get_verifying_key().to_string()
+    keccak_hash = keccak(public_key)
+    address = "0x" + keccak_hash.hex()[-40:]
+    return address
+
+def generate_contract_address(sender, nonce=0):
+    rlp_encoded = rlp.encode([bytes.fromhex(sender[2:]), nonce])
+    keccak_hash = keccak(rlp_encoded)
+    return '0x' + keccak_hash[-20:].hex()
+
+def generate_address():
+    private_key = os.urandom(32)
+    private_key_hex = binascii.hexlify(private_key).decode()
+    sender_address = private_key_to_address(private_key_hex)
+    contract_address = generate_contract_address(sender_address, 0)
+    return private_key_hex, sender_address, contract_address
+
+def find_address_with_prefix_suffix(args):
+    prefix, suffix, num_searches, counter, lock, result_queue = args
+    pid = current_process().pid
+
+    for _ in range(num_searches):
+        private_key_hex, sender_address, contract_address = generate_address()
+        with lock:
+            counter.value += 1
+
+        if sender_address.startswith(prefix) and contract_address.startswith(prefix) and contract_address.endswith(suffix):
+            result_queue.put((private_key_hex, sender_address, contract_address))
+            return
+
+        if counter.value % 10000 == 0:
+            print(f"[Process {pid}] Checked {counter.value} addresses so far...")
+
+    result_queue.put(None)
+
+if __name__ == "__main__":
+    prefix = '0x0000'
+    suffix = '0000'
+    num_processes = cpu_count()
+    num_searches_per_process = 1000000
+
+    m = Manager()
+
+    while True:
+        counter = m.Value('i', 0)
+        lock = m.Lock()
+        result_queue = m.Queue()
+
+        with Pool(num_processes) as p:
+            p.map_async(find_address_with_prefix_suffix, [(prefix, suffix, num_searches_per_process, counter, lock, result_queue) for _ in range(num_processes)])
+
+            # Wait for a result
+            result = result_queue.get()
+            if result:
+                private_key_hex, sender_address, contract_address = result
+                print(f"Private key: {private_key_hex}")
+                print(f"Sender Address: {sender_address}")
+                print(f"Contract Address: {contract_address}")
+                break
+
+            # Terminate all processes
+            p.terminate()
